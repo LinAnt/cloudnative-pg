@@ -32,7 +32,13 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 	"github.com/cloudnative-pg/cloudnative-pg/tests"
 	testUtils "github.com/cloudnative-pg/cloudnative-pg/tests/utils"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/backups"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/clusterutils"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/minio"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/postgres"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/secrets"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/storage"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/yaml"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -75,11 +81,11 @@ var _ = Describe("Verify Volume Snapshot",
 					Skip("Test depth is lower than the amount requested for this test")
 				}
 				var err error
-				clusterName, err = env.GetResourceNameFromYAML(sampleFile)
+				clusterName, err = yaml.GetResourceNameFromYAML(env.Scheme, sampleFile)
 				Expect(err).ToNot(HaveOccurred())
 
 				// Initializing namespace variable to be used in test case
-				namespace, err = env.CreateUniqueTestNamespace(namespacePrefix)
+				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 
 				// Creating a cluster with three nodes
@@ -89,7 +95,7 @@ var _ = Describe("Verify Volume Snapshot",
 			It("can create a Volume Snapshot", func() {
 				var backupObject apiv1.Backup
 				By("creating a volumeSnapshot and waiting until it's completed", func() {
-					err := testUtils.CreateOnDemandBackupViaKubectlPlugin(
+					err := backups.CreateOnDemandBackupViaKubectlPlugin(
 						namespace,
 						clusterName,
 						"",
@@ -101,7 +107,7 @@ var _ = Describe("Verify Volume Snapshot",
 					// trigger a checkpoint as the backup may run on standby
 					CheckPointAndSwitchWalOnPrimary(namespace, clusterName)
 					Eventually(func(g Gomega) {
-						backupList, err := env.GetBackupList(namespace)
+						backupList, err := backups.GetBackupList(env.Ctx, env.Client, namespace)
 						g.Expect(err).ToNot(HaveOccurred())
 						for _, backup := range backupList.Items {
 							if !strings.Contains(backup.Name, clusterName) {
@@ -119,7 +125,7 @@ var _ = Describe("Verify Volume Snapshot",
 				By("checking that volumeSnapshots are properly labeled", func() {
 					Eventually(func(g Gomega) {
 						for _, snapshot := range backupObject.Status.BackupSnapshotStatus.Elements {
-							volumeSnapshot, err := env.GetVolumeSnapshot(namespace, snapshot.Name)
+							volumeSnapshot, err := backups.GetVolumeSnapshot(env.Ctx, env.Client, namespace, snapshot.Name)
 							g.Expect(err).ToNot(HaveOccurred())
 							g.Expect(volumeSnapshot.Name).Should(ContainSubstring(clusterName))
 							g.Expect(volumeSnapshot.Labels[utils.BackupNameLabelName]).To(BeEquivalentTo(backupObject.Name))
@@ -157,10 +163,10 @@ var _ = Describe("Verify Volume Snapshot",
 				}
 
 				var err error
-				clusterToSnapshotName, err = env.GetResourceNameFromYAML(clusterToSnapshot)
+				clusterToSnapshotName, err = yaml.GetResourceNameFromYAML(env.Scheme, clusterToSnapshot)
 				Expect(err).ToNot(HaveOccurred())
 
-				namespace, err = env.CreateUniqueTestNamespace(namespacePrefix)
+				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("create the certificates for MinIO", func() {
@@ -168,12 +174,14 @@ var _ = Describe("Verify Volume Snapshot",
 					Expect(err).ToNot(HaveOccurred())
 				})
 
-				_, err = testUtils.CreateObjectStorageSecret(
+				_, err = secrets.CreateObjectStorageSecret(
+					env.Ctx,
+					env.Client,
 					namespace,
 					"backup-storage-creds",
 					"minio",
 					"minio123",
-					env)
+				)
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -194,7 +202,7 @@ var _ = Describe("Verify Volume Snapshot",
 				})
 
 				By("verify test connectivity to minio using barman-cloud-wal-archive script", func() {
-					primaryPod, err := env.GetClusterPrimary(namespace, clusterToSnapshotName)
+					primaryPod, err := clusterutils.GetClusterPrimary(env.Ctx, env.Client, namespace, clusterToSnapshotName)
 					Expect(err).ToNot(HaveOccurred())
 					Eventually(func() (bool, error) {
 						connectionStatus, err := minio.TestConnectivityUsingBarmanCloudWalArchive(
@@ -210,13 +218,15 @@ var _ = Describe("Verify Volume Snapshot",
 				By("creating a snapshot and waiting until it's completed", func() {
 					var err error
 					backupName := fmt.Sprintf("%s-example", clusterToSnapshotName)
-					backup, err = testUtils.CreateOnDemandBackup(
+					backup, err = backups.CreateOnDemandBackup(
+						env.Ctx,
+						env.Client,
 						namespace,
 						clusterToSnapshotName,
 						backupName,
 						apiv1.BackupTargetStandby,
 						apiv1.BackupMethodVolumeSnapshot,
-						env)
+					)
 					Expect(err).ToNot(HaveOccurred())
 					// trigger a checkpoint
 					CheckPointAndSwitchWalOnPrimary(namespace, clusterToSnapshotName)
@@ -239,11 +249,11 @@ var _ = Describe("Verify Volume Snapshot",
 					Expect(err).ToNot(HaveOccurred())
 					Expect(snapshotList.Items).To(HaveLen(len(backup.Status.BackupSnapshotStatus.Elements)))
 
-					envVars := testUtils.EnvVarsForSnapshots{
+					envVars := storage.EnvVarsForSnapshots{
 						DataSnapshot: snapshotDataEnv,
 						WalSnapshot:  snapshotWalEnv,
 					}
-					err = testUtils.SetSnapshotNameAsEnv(&snapshotList, backup, envVars)
+					err = storage.SetSnapshotNameAsEnv(&snapshotList, backup, envVars)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
@@ -252,7 +262,7 @@ var _ = Describe("Verify Volume Snapshot",
 					tableLocator := TableLocator{
 						Namespace:    namespace,
 						ClusterName:  clusterToSnapshotName,
-						DatabaseName: testUtils.AppDBName,
+						DatabaseName: postgres.AppDBName,
 						TableName:    tableName,
 					}
 					AssertCreateTestData(env, tableLocator)
@@ -271,7 +281,7 @@ var _ = Describe("Verify Volume Snapshot",
 						env,
 						namespace,
 						clusterToSnapshotName,
-						testUtils.AppDBName,
+						postgres.AppDBName,
 						apiv1.ApplicationUserSecretSuffix,
 					)
 					defer func() {
@@ -287,7 +297,7 @@ var _ = Describe("Verify Volume Snapshot",
 					AssertArchiveWalOnMinio(namespace, clusterToSnapshotName, clusterToSnapshotName)
 				})
 
-				clusterToRestoreName, err := env.GetResourceNameFromYAML(clusterSnapshotRestoreFile)
+				clusterToRestoreName, err := yaml.GetResourceNameFromYAML(env.Scheme, clusterSnapshotRestoreFile)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("creating the cluster to be restored through snapshot and PITR", func() {
@@ -299,7 +309,7 @@ var _ = Describe("Verify Volume Snapshot",
 					tableLocator := TableLocator{
 						Namespace:    namespace,
 						ClusterName:  clusterToRestoreName,
-						DatabaseName: testUtils.AppDBName,
+						DatabaseName: postgres.AppDBName,
 						TableName:    tableName,
 					}
 					AssertDataExpectedCount(env, tableLocator, 2)
@@ -369,13 +379,13 @@ var _ = Describe("Verify Volume Snapshot",
 				}
 
 				var err error
-				namespace, err = env.CreateUniqueTestNamespace(namespacePrefix)
+				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 				DeferCleanup(func() {
 					_ = os.Unsetenv(snapshotDataEnv)
 					_ = os.Unsetenv(snapshotWalEnv)
 				})
-				clusterToBackupName, err = env.GetResourceNameFromYAML(clusterToBackupFilePath)
+				clusterToBackupName, err = yaml.GetResourceNameFromYAML(env.Scheme, clusterToBackupFilePath)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("creating the cluster on which to execute the backup", func() {
@@ -389,13 +399,13 @@ var _ = Describe("Verify Volume Snapshot",
 					tableLocator := TableLocator{
 						Namespace:    namespace,
 						ClusterName:  clusterToBackupName,
-						DatabaseName: testUtils.AppDBName,
+						DatabaseName: postgres.AppDBName,
 						TableName:    tableName,
 					}
 					AssertCreateTestData(env, tableLocator)
 				})
 
-				backupName, err := env.GetResourceNameFromYAML(backupFileFilePath)
+				backupName, err := yaml.GetResourceNameFromYAML(env.Scheme, backupFileFilePath)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("executing the backup", func() {
@@ -412,7 +422,7 @@ var _ = Describe("Verify Volume Snapshot",
 							"Backup should be completed correctly, error message is '%s'",
 							backup.Status.Error)
 					}, testTimeouts[testUtils.VolumeSnapshotIsReady]).Should(Succeed())
-					testUtils.AssertBackupConditionInClusterStatus(env, namespace, clusterToBackupName)
+					backups.AssertBackupConditionInClusterStatus(env.Ctx, env.Client, namespace, clusterToBackupName)
 				})
 
 				By("checking that the backup status is correctly populated", func() {
@@ -427,19 +437,19 @@ var _ = Describe("Verify Volume Snapshot",
 				var clusterToBackup *apiv1.Cluster
 
 				By("fetching the created cluster", func() {
-					clusterToBackup, err = env.GetCluster(namespace, clusterToBackupName)
+					clusterToBackup, err = clusterutils.GetCluster(env.Ctx, env.Client, namespace, clusterToBackupName)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				snapshotList := getAndVerifySnapshots(clusterToBackup, backup)
-				envVars := testUtils.EnvVarsForSnapshots{
+				envVars := storage.EnvVarsForSnapshots{
 					DataSnapshot: snapshotDataEnv,
 					WalSnapshot:  snapshotWalEnv,
 				}
-				err = testUtils.SetSnapshotNameAsEnv(&snapshotList, &backup, envVars)
+				err = storage.SetSnapshotNameAsEnv(&snapshotList, &backup, envVars)
 				Expect(err).ToNot(HaveOccurred())
 
-				clusterToRestoreName, err := env.GetResourceNameFromYAML(clusterToRestoreFilePath)
+				clusterToRestoreName, err := yaml.GetResourceNameFromYAML(env.Scheme, clusterToRestoreFilePath)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("executing the restore", func() {
@@ -455,14 +465,14 @@ var _ = Describe("Verify Volume Snapshot",
 					tableLocator := TableLocator{
 						Namespace:    namespace,
 						ClusterName:  clusterToRestoreName,
-						DatabaseName: testUtils.AppDBName,
+						DatabaseName: postgres.AppDBName,
 						TableName:    tableName,
 					}
 					AssertDataExpectedCount(env, tableLocator, 2)
 				})
 			})
 			It("can take a snapshot targeting the primary", func() {
-				backupName, err := env.GetResourceNameFromYAML(backupPrimaryFilePath)
+				backupName, err := yaml.GetResourceNameFromYAML(env.Scheme, backupPrimaryFilePath)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("executing the backup", func() {
@@ -480,7 +490,7 @@ var _ = Describe("Verify Volume Snapshot",
 							"Backup should be completed correctly, error message is '%s'",
 							backup.Status.Error)
 					}, testTimeouts[testUtils.VolumeSnapshotIsReady]).Should(Succeed())
-					testUtils.AssertBackupConditionInClusterStatus(env, namespace, clusterToBackupName)
+					backups.AssertBackupConditionInClusterStatus(env.Ctx, env.Client, namespace, clusterToBackupName)
 				})
 
 				By("checking that the backup status is correctly populated", func() {
@@ -495,7 +505,7 @@ var _ = Describe("Verify Volume Snapshot",
 				var clusterToBackup *apiv1.Cluster
 
 				By("fetching the created cluster", func() {
-					clusterToBackup, err = env.GetCluster(namespace, clusterToBackupName)
+					clusterToBackup, err = clusterutils.GetCluster(env.Ctx, env.Client, namespace, clusterToBackupName)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
@@ -508,7 +518,7 @@ var _ = Describe("Verify Volume Snapshot",
 
 			It("can take a snapshot in a single instance cluster", func() {
 				By("scaling down the cluster to a single instance", func() {
-					cluster, err := env.GetCluster(namespace, clusterToBackupName)
+					cluster, err := clusterutils.GetCluster(env.Ctx, env.Client, namespace, clusterToBackupName)
 					Expect(err).ToNot(HaveOccurred())
 
 					updated := cluster.DeepCopy()
@@ -519,7 +529,7 @@ var _ = Describe("Verify Volume Snapshot",
 
 				By("ensuring there is only one pod", func() {
 					Eventually(func(g Gomega) {
-						pods, err := env.GetClusterPodList(namespace, clusterToBackupName)
+						pods, err := clusterutils.GetClusterPodList(env.Ctx, env.Client, namespace, clusterToBackupName)
 						g.Expect(err).NotTo(HaveOccurred())
 						g.Expect(pods.Items).To(HaveLen(1))
 					}, testTimeouts[testUtils.ClusterIsReadyQuick]).Should(Succeed())
@@ -527,13 +537,15 @@ var _ = Describe("Verify Volume Snapshot",
 
 				backupName := "single-instance-snap"
 				By("taking a backup snapshot", func() {
-					_, err := testUtils.CreateOnDemandBackup(
+					_, err := backups.CreateOnDemandBackup(
+						env.Ctx,
+						env.Client,
 						namespace,
 						clusterToBackupName,
 						backupName,
 						apiv1.BackupTargetStandby,
 						apiv1.BackupMethodVolumeSnapshot,
-						env)
+					)
 					Expect(err).NotTo(HaveOccurred())
 				})
 
@@ -547,7 +559,7 @@ var _ = Describe("Verify Volume Snapshot",
 							"Backup should be completed correctly, error message is '%s'",
 							backup.Status.Error)
 					}, testTimeouts[testUtils.VolumeSnapshotIsReady]).Should(Succeed())
-					testUtils.AssertBackupConditionInClusterStatus(env, namespace, clusterToBackupName)
+					backups.AssertBackupConditionInClusterStatus(env.Ctx, env.Client, namespace, clusterToBackupName)
 				})
 
 				By("checking that the backup status is correctly populated", func() {
@@ -562,7 +574,7 @@ var _ = Describe("Verify Volume Snapshot",
 				var clusterToBackup *apiv1.Cluster
 				By("fetching the created cluster", func() {
 					var err error
-					clusterToBackup, err = env.GetCluster(namespace, clusterToBackupName)
+					clusterToBackup, err = clusterutils.GetCluster(env.Ctx, env.Client, namespace, clusterToBackupName)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
@@ -591,17 +603,17 @@ var _ = Describe("Verify Volume Snapshot",
 			)
 
 			var clusterToSnapshotName string
-			var backup *apiv1.Backup
+			var backupTaken *apiv1.Backup
 			BeforeAll(func() {
 				if testLevelEnv.Depth < int(level) {
 					Skip("Test depth is lower than the amount requested for this test")
 				}
 
 				var err error
-				clusterToSnapshotName, err = env.GetResourceNameFromYAML(clusterToSnapshot)
+				clusterToSnapshotName, err = yaml.GetResourceNameFromYAML(env.Scheme, clusterToSnapshot)
 				Expect(err).ToNot(HaveOccurred())
 
-				namespace, err = env.CreateUniqueTestNamespace(namespacePrefix)
+				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("create the certificates for MinIO", func() {
@@ -610,12 +622,13 @@ var _ = Describe("Verify Volume Snapshot",
 				})
 
 				By("creating the credentials for minio", func() {
-					_, err = testUtils.CreateObjectStorageSecret(
+					_, err = secrets.CreateObjectStorageSecret(
+						env.Ctx,
+						env.Client,
 						namespace,
 						"backup-storage-creds",
 						"minio",
 						"minio123",
-						env,
 					)
 					Expect(err).ToNot(HaveOccurred())
 				})
@@ -625,7 +638,7 @@ var _ = Describe("Verify Volume Snapshot",
 				})
 
 				By("verify test connectivity to minio using barman-cloud-wal-archive script", func() {
-					primaryPod, err := env.GetClusterPrimary(namespace, clusterToSnapshotName)
+					primaryPod, err := clusterutils.GetClusterPrimary(env.Ctx, env.Client, namespace, clusterToSnapshotName)
 					Expect(err).ToNot(HaveOccurred())
 					Eventually(func() (bool, error) {
 						connectionStatus, err := minio.TestConnectivityUsingBarmanCloudWalArchive(
@@ -652,7 +665,7 @@ var _ = Describe("Verify Volume Snapshot",
 						env,
 						namespace,
 						clusterToSnapshotName,
-						testUtils.AppDBName,
+						postgres.AppDBName,
 						apiv1.ApplicationUserSecretSuffix,
 					)
 					defer func() {
@@ -664,7 +677,7 @@ var _ = Describe("Verify Volume Snapshot",
 					tableLocator := TableLocator{
 						Namespace:    namespace,
 						ClusterName:  clusterToSnapshotName,
-						DatabaseName: testUtils.AppDBName,
+						DatabaseName: postgres.AppDBName,
 						TableName:    tableName,
 					}
 					AssertCreateTestData(env, tableLocator)
@@ -680,7 +693,8 @@ var _ = Describe("Verify Volume Snapshot",
 				By("creating a snapshot and waiting until it's completed", func() {
 					var err error
 					backupName := fmt.Sprintf("%s-online", clusterToSnapshotName)
-					backup, err = testUtils.CreateBackup(
+					backupTaken, err = backups.CreateBackup(
+						env.Ctx, env.Client,
 						apiv1.Backup{
 							ObjectMeta: metav1.ObjectMeta{
 								Namespace: namespace,
@@ -692,7 +706,6 @@ var _ = Describe("Verify Volume Snapshot",
 								Cluster: apiv1.LocalObjectReference{Name: clusterToSnapshotName},
 							},
 						},
-						env,
 					)
 					Expect(err).ToNot(HaveOccurred())
 
@@ -700,30 +713,30 @@ var _ = Describe("Verify Volume Snapshot",
 						err = env.Client.Get(env.Ctx, types.NamespacedName{
 							Namespace: namespace,
 							Name:      backupName,
-						}, backup)
+						}, backupTaken)
 						g.Expect(err).ToNot(HaveOccurred())
-						g.Expect(backup.Status.Phase).To(BeEquivalentTo(apiv1.BackupPhaseCompleted),
+						g.Expect(backupTaken.Status.Phase).To(BeEquivalentTo(apiv1.BackupPhaseCompleted),
 							"Backup should be completed correctly, error message is '%s'",
-							backup.Status.Error)
-						g.Expect(backup.Status.BackupSnapshotStatus.Elements).To(HaveLen(2))
-						g.Expect(backup.Status.BackupLabelFile).ToNot(BeEmpty())
+							backupTaken.Status.Error)
+						g.Expect(backupTaken.Status.BackupSnapshotStatus.Elements).To(HaveLen(2))
+						g.Expect(backupTaken.Status.BackupLabelFile).ToNot(BeEmpty())
 					}, testTimeouts[testUtils.VolumeSnapshotIsReady]).Should(Succeed())
 				})
 
 				By("fetching the volume snapshots", func() {
-					snapshotList, err := getSnapshots(backup.Name, clusterToSnapshotName, namespace)
+					snapshotList, err := getSnapshots(backupTaken.Name, clusterToSnapshotName, namespace)
 					Expect(err).ToNot(HaveOccurred())
-					Expect(snapshotList.Items).To(HaveLen(len(backup.Status.BackupSnapshotStatus.Elements)))
+					Expect(snapshotList.Items).To(HaveLen(len(backupTaken.Status.BackupSnapshotStatus.Elements)))
 
-					envVars := testUtils.EnvVarsForSnapshots{
+					envVars := storage.EnvVarsForSnapshots{
 						DataSnapshot: snapshotDataEnv,
 						WalSnapshot:  snapshotWalEnv,
 					}
-					err = testUtils.SetSnapshotNameAsEnv(&snapshotList, backup, envVars)
+					err = storage.SetSnapshotNameAsEnv(&snapshotList, backupTaken, envVars)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
-				clusterToRestoreName, err := env.GetResourceNameFromYAML(clusterSnapshotRestoreFile)
+				clusterToRestoreName, err := yaml.GetResourceNameFromYAML(env.Scheme, clusterSnapshotRestoreFile)
 				Expect(err).ToNot(HaveOccurred())
 
 				By("creating the cluster to be restored through snapshot and PITR", func() {
@@ -735,7 +748,7 @@ var _ = Describe("Verify Volume Snapshot",
 					tableLocator := TableLocator{
 						Namespace:    namespace,
 						ClusterName:  clusterToRestoreName,
-						DatabaseName: testUtils.AppDBName,
+						DatabaseName: postgres.AppDBName,
 						TableName:    tableName,
 					}
 					AssertDataExpectedCount(env, tableLocator, 4)
@@ -750,7 +763,7 @@ var _ = Describe("Verify Volume Snapshot",
 						env,
 						namespace,
 						clusterToSnapshotName,
-						testUtils.AppDBName,
+						postgres.AppDBName,
 						apiv1.ApplicationUserSecretSuffix,
 					)
 					defer func() {
@@ -768,20 +781,20 @@ var _ = Describe("Verify Volume Snapshot",
 
 				// reuse the snapshot taken from the clusterToSnapshot cluster
 				By("fetching the volume snapshots", func() {
-					snapshotList, err := getSnapshots(backup.Name, clusterToSnapshotName, namespace)
+					snapshotList, err := getSnapshots(backupTaken.Name, clusterToSnapshotName, namespace)
 					Expect(err).ToNot(HaveOccurred())
-					Expect(snapshotList.Items).To(HaveLen(len(backup.Status.BackupSnapshotStatus.Elements)))
+					Expect(snapshotList.Items).To(HaveLen(len(backupTaken.Status.BackupSnapshotStatus.Elements)))
 
-					envVars := testUtils.EnvVarsForSnapshots{
+					envVars := storage.EnvVarsForSnapshots{
 						DataSnapshot: snapshotDataEnv,
 						WalSnapshot:  snapshotWalEnv,
 					}
-					err = testUtils.SetSnapshotNameAsEnv(&snapshotList, backup, envVars)
+					err = storage.SetSnapshotNameAsEnv(&snapshotList, backupTaken, envVars)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				By("scale up the cluster", func() {
-					err := env.ScaleClusterSize(namespace, clusterToSnapshotName, 3)
+					err := clusterutils.ScaleClusterSize(env.Ctx, env.Client, namespace, clusterToSnapshotName, 3)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
@@ -792,13 +805,13 @@ var _ = Describe("Verify Volume Snapshot",
 
 				// we need to verify the streaming replica continue works
 				By("verifying the correct data exists in the new pod of the scaled cluster", func() {
-					podList, err := env.GetClusterReplicas(namespace, clusterToSnapshotName)
+					podList, err := clusterutils.GetClusterReplicas(env.Ctx, env.Client, namespace, clusterToSnapshotName)
 					Expect(err).ToNot(HaveOccurred())
 					Expect(podList.Items).To(HaveLen(2))
 					tableLocator := TableLocator{
 						Namespace:    namespace,
 						ClusterName:  clusterToSnapshotName,
-						DatabaseName: testUtils.AppDBName,
+						DatabaseName: postgres.AppDBName,
 						TableName:    tableName,
 					}
 					AssertDataExpectedCount(env, tableLocator, 6)
