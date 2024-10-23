@@ -1636,6 +1636,7 @@ type BackupSource struct {
 	EndpointCA *SecretKeySelector `json:"endpointCA,omitempty"`
 
 	// When set to true the operator will delegate the restore process to the registered restore plugin.
+	// +optional
 	UsePlugin *bool `json:"usePlugin,omitempty"`
 }
 
